@@ -304,7 +304,7 @@ Respond ONLY with this exact JSON format (no additional text):
 # Example usage
 if __name__ == "__main__":
     # SETUP: Replace with your configuration
-    API_KEY = "AIzaSyCK3xImjoMGO2pIU9g5XXds0TkwyIgpihc"
+    API_KEY = os.getenv('GENAI_API_KEY')  # Set your Gemini API key in environment variable
     
     # Path to your existing Excel file (with headers in row 5)
     EXCEL_FILE = "./proposals_sheet.xlsx"  # Change to your Excel file path
@@ -313,7 +313,7 @@ if __name__ == "__main__":
     PDF_FOLDER = "./proposals"  # Change to your PDF folder path
     
     # Output file path (will create new file, won't overwrite original)
-    OUTPUT_FILE = "./proposals_sheet_new.xlsx"
+    OUTPUT_FILE = "./proposals_sheet_updated.xlsx"
     
     # Use Pro model for highest accuracy
     USE_PRO_MODEL = True
