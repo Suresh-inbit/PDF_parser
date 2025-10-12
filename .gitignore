@@ -2,3 +2,4 @@ proposals/
 *xlsx
 __pycache__/
 *.pyc
+proposals_sheet.xlsx
