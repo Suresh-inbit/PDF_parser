@@ -1,2 +1,4 @@
 proposals/
 *xlsx
+__pycache__/
+*.pyc
