@@ -1,10 +1,9 @@
 import os
 import pandas as pd
-import google.generativeai as genai
 from pathlib import Path
 import json
 from openpyxl import load_workbook
-
+from google import genai
 class ProposalExtractorGemini:
     def __init__(self, api_key, use_pro_model=True):
         """Initialize with Gemini API key
@@ -14,10 +13,9 @@ class ProposalExtractorGemini:
             use_pro_model: If True, uses gemini-2.5-pro (highest accuracy, slower)
                           If False, uses gemini-2.5-flash (fast, good accuracy)
         """
-        genai.configure(api_key=api_key)
-        model_name = 'gemini-2.5-pro' if use_pro_model else 'gemini-2.5-flash'
-        self.model = genai.GenerativeModel(model_name)
-        print(f"Using model: {model_name}")
+        self.client = genai.Client(api_key=api_key)
+        self.model_name = 'gemini-2.5-pro' if use_pro_model else 'gemini-2.5-flash'
+        print(f"Using model: {self.model_name}")
         
         # Define the extraction prompt
         self.extraction_prompt = """
@@ -73,6 +71,8 @@ Respond ONLY with this exact JSON format (no additional text):
     
     def extract_from_pdf(self, pdf_path, max_retries=2):
         """Extract criteria from PDF using Gemini with validation
+            This function uploads the PDF, sends it to Gemini for analysis,
+            and retries if there are transient errors or JSON parsing issues.
         
         Args:
             pdf_path: Path to PDF file
@@ -88,7 +88,7 @@ Respond ONLY with this exact JSON format (no additional text):
         pdf_file = None
         while upload_attempts <= max_retries:
             try:
-                pdf_file = genai.upload_file(pdf_path)
+                pdf_file = self.client.files.upload(file=pdf_path)
                 break
             except Exception as e:
                 upload_attempts += 1
@@ -103,7 +103,10 @@ Respond ONLY with this exact JSON format (no additional text):
         last_exception = None
         for attempt in range(max_retries + 1):
             try:
-                response = self.model.generate_content([pdf_file, self.extraction_prompt])
+                response = self.client.models.generate_content(
+                    model=self.model_name,
+                    contents=[pdf_file, self.extraction_prompt]
+                    )
 
                 # Provide robust extraction of text portion
                 response_text = getattr(response, 'text', '')
@@ -137,17 +140,6 @@ Respond ONLY with this exact JSON format (no additional text):
                 print(f"  ⚠ Error parsing JSON response: {str(e)}")
                 snippet = (response_text[:200] + '...') if 'response_text' in locals() else ''
                 print(f"  Raw response (truncated): {snippet}")
-                if attempt < max_retries:
-                    wait = (2 ** (attempt + 1)) + random()
-                    print(f"  Retrying in {wait:.1f}s...")
-                    time.sleep(wait)
-                    continue
-                else:
-                    try:
-                        pdf_file.delete()
-                    except Exception:
-                        pass
-                    return None
             except Exception as e:
                 last_exception = e
                 # Inspect message to detect typical timeout codes
@@ -155,7 +147,7 @@ Respond ONLY with this exact JSON format (no additional text):
                 print(f"  ⚠ Error during analysis: {err_msg}")
                 if attempt < max_retries:
                     wait = (2 ** (attempt + 1)) + random()
-                    print(f"  Retrying (attempt {attempt + 2}/{max_retries + 1}) in {wait:.1f}s...")
+                    print(f"  Retrying (attempt {attempt +1}/{max_retries + 1}) in {wait:.1f}s...")
                     time.sleep(wait)
                     continue
                 else:
@@ -183,7 +175,7 @@ Respond ONLY with this exact JSON format (no additional text):
 
         pdf_folder_path = Path(pdf_folder)
         pdf_files = list(pdf_folder_path.glob('*/*.pdf'))
-        pdf_files += list(pdf_folder_path.glob(f'*/*rop*/*.pdf'))
+        pdf_files += list(pdf_folder_path.glob(f'*/*rop*/*.pdf')) # Include nested proposal folders
 
         if not pdf_files:
             print(f"No PDF files found in {pdf_folder}")
@@ -193,37 +185,22 @@ Respond ONLY with this exact JSON format (no additional text):
 
         # Build lookup map from TPN to pdf paths
         pdf_map = {}
-        for pf in pdf_files:
-            tpn = self.extract_tpn_from_filename(pf.name)
+        for pf in pdf_files:            
+            tpn = pf.parent.__str__().split('/')[1]  
             if tpn:
                 pdf_map.setdefault(str(tpn), []).append(pf)
             else:
                 pdf_map.setdefault(pf.name, []).append(pf)
-        # print(*pdf_map.items())
-        if 'TPN No.' not in df.columns:
-            print("  ⚠ 'TPN No.' column not found in Excel. Aborting.")
-            return
-        
         for row_idx, row in df.iterrows():
-            print()
             excel_row = row_idx + 6
-            # print(pd.isna(row['c) Other fundings if any?']), row['c) Other fundings if any?'])
-            if not pd.isna(row.get('Has the institution specified minimum of two faculty members with relevant expertise in quantum technologies, each dedicating at least one-third of their academic time to the lab and its activities? ')):
+            if not pd.isna(row.iloc[20]): # To perform check whether the row is already filled
                 
                 print(f"Row {excel_row}: already filled, skipping.")
                 continue
-            tpn_val = row.get('TPN No.')
-            if pd.isna(tpn_val):
-                print(f"Row {excel_row}: Empty TPN, skipping.")
-                continue
 
-            if isinstance(tpn_val, float) and tpn_val.is_integer():
-                tpn_str = str(int(tpn_val))
-            else:
-                tpn_str = str(tpn_val).strip()
-
+            tpn_str = str(row.get('TPN No.'))
             matching_pdfs = pdf_map.get(tpn_str)
-            if not matching_pdfs:
+            if not matching_pdfs: # Try partial match
                 matches = [pf for pf in pdf_files if tpn_str in pf.name]
                 if matches:
                     matching_pdfs = matches
@@ -231,37 +208,23 @@ Respond ONLY with this exact JSON format (no additional text):
             if not matching_pdfs:
                 print(f"  ⚠ Could not find PDF for TPN {tpn_str} (Excel row {excel_row})")
                 continue
-
+            print(matching_pdfs)
             
             pdf_file = matching_pdfs[0]
             print(f"Processing Excel row {excel_row} - TPN {tpn_str}: {pdf_file.name}")
 
             extracted_data = self.extract_from_pdf(pdf_file)
+
             if extracted_data:
-                # Update columns L..Z
-                ws[f'L{excel_row}'] = extracted_data.get('col_l', '-')
-                ws[f'M{excel_row}'] = extracted_data.get('col_m', '-')
-                ws[f'N{excel_row}'] = extracted_data.get('col_n', '-')
-                ws[f'O{excel_row}'] = extracted_data.get('col_o', '-')
-                ws[f'P{excel_row}'] = extracted_data.get('col_p', '-')
-                ws[f'Q{excel_row}'] = extracted_data.get('col_q', '-')
-                ws[f'R{excel_row}'] = extracted_data.get('col_r', '-')
-                ws[f'S{excel_row}'] = extracted_data.get('col_s', '-')
-                ws[f'T{excel_row}'] = extracted_data.get('col_t', '-')
-                ws[f'U{excel_row}'] = extracted_data.get('col_u', '-')
-                ws[f'V{excel_row}'] = extracted_data.get('col_v', '-')
-                ws[f'W{excel_row}'] = extracted_data.get('col_w', '-')
-                ws[f'X{excel_row}'] = extracted_data.get('col_x', '-')
-                ws[f'Y{excel_row}'] = extracted_data.get('col_y', '-')
-                ws[f'Z{excel_row}'] = extracted_data.get('col_z', '-')
-                ws[f'AA{excel_row}'] = extracted_data.get('col_aa', '-')
-                ws[f'AB{excel_row}'] = extracted_data.get('col_ab', '-')
-
-
+                # Update columns L..AB
+                for col in range(11, 28):  # Columns L (12) to AB (28)
+                    col_letter = chr(ord('A') + col)
+                    if col>25:
+                        col_letter = 'A' + chr(ord('A') + (col - 26))
+                    ws[f'{col_letter}{excel_row}'] = extracted_data.get(f'col_{col_letter.lower()}', '-')
                 print(f"  ✓ Updated row {excel_row} in Excel, TPN: {tpn_str}")
             else:
                 print(f"  ⚠ Could not extract data from {pdf_file.name}")
-            
 
             wb.save(output_path)
             print()
@@ -269,41 +232,11 @@ Respond ONLY with this exact JSON format (no additional text):
         print(f"\n{'='*60}")
         print(f"✓ Excel file updated and saved to: {output_path}")
         print(f"{'='*60}")
-    
-    def extract_tpn_from_filename(self, filename):
-        """Extract TPN number from filename if present"""
-        import re
-        
-        # Try to find just numbers
-        match = re.search(r'(?<=ProposalID_)\d+(?=_finalproposal)', filename)
-        if match:
-            return match.group()
-        
-        return None
-    
-    def find_row_by_tpn(self, df, tpn, filename):
-        """Find row index by TPN number or filename
-        
-        Args:
-            df: DataFrame with Excel data
-            tpn: TPN number to search for
-            
-        Returns:
-            Row index (0-based) or None if not found
-        """
-        # Try to find by TPN No. column
-        if 'TPN No.' in df.columns and tpn:
-            tpn_col = df['TPN No.'].astype(str)
-            matches = tpn_col.str.contains(str(tpn), na=False, case=False)
-            if matches.any():
-                return matches.idxmax()
-        
-        return None
 
+    
 
-# Example usage
 if __name__ == "__main__":
-    # SETUP: Replace with your configuration
+   
     API_KEY = os.getenv('GENAI_API_KEY')  # Set your Gemini API key in environment variable
     
     # Path to your existing Excel file (with headers in row 5)
@@ -316,8 +249,8 @@ if __name__ == "__main__":
     OUTPUT_FILE = "./proposals_sheet_updated.xlsx"
     
     # Use Pro model for highest accuracy
-    USE_PRO_MODEL = True
-    
+    USE_PRO_MODEL = False
+    print(API_KEY)
     print("="*60)
     print("PDF Proposal Extractor - Excel Updater")
     print("="*60)
